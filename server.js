@@ -17,17 +17,39 @@ app.use(
       "https://drlucasgomes.com.br",
       "https://www.drlucasgomes.com.br"
     ],
-    methods: ["POST"]
+    methods: ["POST", "GET"]
   })
 );
 
 const contatoLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 3,
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: "Muitas tentativas. Tente novamente mais tarde."
 });
+
+function checarVariaveis() {
+  const obrigatorias = [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SMTP_HOST",
+    "SMTP_PORT",
+    "SMTP_USER",
+    "SMTP_PASS",
+    "EMAIL_DESTINO"
+  ];
+
+  const faltando = obrigatorias.filter((nome) => !process.env[nome]);
+
+  if (faltando.length > 0) {
+    console.error("Variáveis faltando no Render:", faltando);
+  } else {
+    console.log("Todas as variáveis principais estão configuradas.");
+  }
+}
+
+checarVariaveis();
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -75,7 +97,6 @@ function pareceSpam({ nome, email, mensagem }) {
   ];
 
   if (contarLinks(texto) >= 2) return true;
-
   if (mensagem && mensagem.length > 2000) return true;
 
   return palavrasBloqueadas.some((palavra) => texto.includes(palavra));
@@ -91,6 +112,9 @@ app.get("/", (req, res) => {
 });
 
 app.post("/contato", contatoLimiter, async (req, res) => {
+  console.log("POST /contato recebido");
+  console.log("Body recebido:", req.body);
+
   try {
     const {
       nome,
@@ -102,9 +126,9 @@ app.post("/contato", contatoLimiter, async (req, res) => {
       website
     } = req.body;
 
-    // Honeypot: campo invisível. Se vier preenchido, provavelmente é robô.
     if (website) {
-      return res.redirect("https://drlucasgomes.com.br/obrigado-contato");
+      console.log("Bloqueado por honeypot. Campo website preenchido.");
+      return res.send("Envio recebido.");
     }
 
     const dados = {
@@ -119,34 +143,48 @@ app.post("/contato", contatoLimiter, async (req, res) => {
       user_agent: req.headers["user-agent"]
     };
 
+    console.log("Dados tratados:", dados);
+
     if (!dados.nome || !dados.whatsapp || !dados.mensagem) {
+      console.error("Campos obrigatórios ausentes.");
       return res.status(400).send("Preencha nome, WhatsApp e mensagem.");
     }
 
     if (!whatsappValido(dados.whatsapp)) {
+      console.error("WhatsApp inválido:", dados.whatsapp);
       return res.status(400).send("Informe um WhatsApp válido.");
     }
 
     if (pareceSpam(dados)) {
       console.log("Spam bloqueado:", dados);
-      return res.redirect("https://drlucasgomes.com.br/obrigado-contato");
+      return res.send("Envio recebido.");
     }
 
-    const { error } = await supabase
+    console.log("Tentando salvar no Supabase...");
+
+    const { data, error } = await supabase
       .from("contatos_consultorio")
-      .insert([dados]);
+      .insert([dados])
+      .select();
 
     if (error) {
-      console.error("Erro Supabase:", error);
-      return res.status(500).send("Erro ao salvar contato.");
+      console.error("Erro Supabase completo:", error);
+      return res.status(500).send("Erro ao salvar contato no Supabase.");
     }
 
-    await transporter.sendMail({
-      from: `"Site Dr. Lucas" <${process.env.SMTP_USER}>`,
-      to: process.env.EMAIL_DESTINO,
-      subject: `Novo contato do site: ${dados.nome}`,
-      replyTo: dados.email || process.env.SMTP_USER,
-      text: `
+    console.log("Contato salvo no Supabase:", data);
+
+    try {
+      console.log("Tentando enviar e-mail...");
+      console.log("SMTP_USER:", process.env.SMTP_USER);
+      console.log("EMAIL_DESTINO:", process.env.EMAIL_DESTINO);
+
+      await transporter.sendMail({
+        from: `"Site Dr. Lucas" <${process.env.SMTP_USER}>`,
+        to: process.env.EMAIL_DESTINO,
+        subject: `Novo contato do site: ${dados.nome}`,
+        replyTo: dados.email || process.env.SMTP_USER,
+        text: `
 Novo contato recebido pelo site:
 
 Nome: ${dados.nome}
@@ -160,13 +198,18 @@ ${dados.mensagem}
 
 IP:
 ${dados.ip}
-      `
-    });
+        `
+      });
+
+      console.log("E-mail enviado com sucesso.");
+    } catch (emailError) {
+      console.error("Contato salvo, mas falhou ao enviar e-mail:", emailError);
+    }
 
     return res.redirect("https://drlucasgomes.com.br/obrigado-contato");
   } catch (err) {
-    console.error("Erro geral:", err);
-    return res.status(500).send("Erro ao enviar contato.");
+    console.error("Erro geral completo:", err);
+    return res.status(500).send("Erro geral no servidor.");
   }
 });
 
