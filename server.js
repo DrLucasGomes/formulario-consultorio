@@ -35,6 +35,7 @@ function checarVariaveis() {
     "SUPABASE_SERVICE_ROLE_KEY",
     "SMTP_HOST",
     "SMTP_PORT",
+    "SMTP_SECURE",
     "SMTP_USER",
     "SMTP_PASS",
     "EMAIL_DESTINO"
@@ -57,12 +58,12 @@ const supabase = createClient(
 );
 
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false,
+  host: process.env.SMTP_HOST || "smtp.gmail.com",
+  port: Number(process.env.SMTP_PORT || 465),
+  secure: String(process.env.SMTP_SECURE || "true") === "true",
   auth: {
     user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+    pass: String(process.env.SMTP_PASS || "").replace(/\s/g, "")
   }
 });
 
@@ -111,6 +112,34 @@ app.get("/", (req, res) => {
   res.send("Servidor do formulário do consultório ativo.");
 });
 
+app.get("/teste-email", async (req, res) => {
+  try {
+    console.log("Iniciando teste de e-mail...");
+    console.log("SMTP_HOST:", process.env.SMTP_HOST);
+    console.log("SMTP_PORT:", process.env.SMTP_PORT);
+    console.log("SMTP_SECURE:", process.env.SMTP_SECURE);
+    console.log("SMTP_USER:", process.env.SMTP_USER);
+    console.log("EMAIL_DESTINO:", process.env.EMAIL_DESTINO);
+
+    await transporter.verify();
+
+    console.log("SMTP verificado com sucesso.");
+
+    await transporter.sendMail({
+      from: `"Teste Site Dr. Lucas" <${process.env.SMTP_USER}>`,
+      to: process.env.EMAIL_DESTINO,
+      subject: "Teste de envio do formulário",
+      text: "Se você recebeu este e-mail, o SMTP do formulário está funcionando."
+    });
+
+    console.log("E-mail de teste enviado com sucesso.");
+    return res.send("E-mail de teste enviado com sucesso.");
+  } catch (err) {
+    console.error("Erro no teste de e-mail:", err);
+    return res.status(500).send("Erro no teste de e-mail. Veja os logs do Render.");
+  }
+});
+
 app.post("/contato", contatoLimiter, async (req, res) => {
   console.log("POST /contato recebido");
   console.log("Body recebido:", req.body);
@@ -123,11 +152,13 @@ app.post("/contato", contatoLimiter, async (req, res) => {
       cidade,
       motivo,
       mensagem,
+      empresa_site_confirmacao,
       website
     } = req.body;
 
-    if (website) {
-      console.log("Bloqueado por honeypot. Campo website preenchido.");
+    // Honeypot novo e antigo. Se qualquer um vier preenchido, provavelmente é robô.
+    if (empresa_site_confirmacao || website) {
+      console.log("Bloqueado por honeypot.");
       return res.send("Envio recebido.");
     }
 
