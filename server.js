@@ -1,8 +1,8 @@
 import express from "express";
 import cors from "cors";
-import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
 import { createClient } from "@supabase/supabase-js";
+import { Resend } from "resend";
 
 const app = express();
 
@@ -33,11 +33,8 @@ function checarVariaveis() {
   const obrigatorias = [
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
-    "SMTP_HOST",
-    "SMTP_PORT",
-    "SMTP_SECURE",
-    "SMTP_USER",
-    "SMTP_PASS",
+    "RESEND_API_KEY",
+    "EMAIL_REMETENTE",
     "EMAIL_DESTINO"
   ];
 
@@ -57,15 +54,7 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp.gmail.com",
-  port: Number(process.env.SMTP_PORT || 465),
-  secure: String(process.env.SMTP_SECURE || "true") === "true",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: String(process.env.SMTP_PASS || "").replace(/\s/g, "")
-  }
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 function limparTexto(valor, limite = 2000) {
   if (!valor) return "";
@@ -108,35 +97,76 @@ function whatsappValido(valor) {
   return somenteNumeros.length >= 10 && somenteNumeros.length <= 13;
 }
 
+function montarTextoEmail(dados) {
+  return `
+Novo contato recebido pelo site:
+
+Nome: ${dados.nome}
+WhatsApp: ${dados.whatsapp}
+E-mail: ${dados.email || "Não informado"}
+Cidade: ${dados.cidade || "Não informada"}
+Motivo: ${dados.motivo || "Não informado"}
+
+Mensagem:
+${dados.mensagem}
+
+IP:
+${dados.ip}
+  `;
+}
+
+function montarHtmlEmail(dados) {
+  return `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #111827;">
+      <h2>Novo contato recebido pelo site</h2>
+
+      <p><strong>Nome:</strong> ${dados.nome}</p>
+      <p><strong>WhatsApp:</strong> ${dados.whatsapp}</p>
+      <p><strong>E-mail:</strong> ${dados.email || "Não informado"}</p>
+      <p><strong>Cidade:</strong> ${dados.cidade || "Não informada"}</p>
+      <p><strong>Motivo:</strong> ${dados.motivo || "Não informado"}</p>
+
+      <hr>
+
+      <p><strong>Mensagem:</strong></p>
+      <p>${dados.mensagem}</p>
+
+      <hr>
+
+      <p style="font-size: 12px; color: #6b7280;">
+        IP: ${dados.ip}
+      </p>
+    </div>
+  `;
+}
+
 app.get("/", (req, res) => {
-  res.send("Servidor do formulário do consultório ativo.");
+  res.send("Servidor do formulário do consultório ativo com Resend.");
 });
 
 app.get("/teste-email", async (req, res) => {
   try {
-    console.log("Iniciando teste de e-mail...");
-    console.log("SMTP_HOST:", process.env.SMTP_HOST);
-    console.log("SMTP_PORT:", process.env.SMTP_PORT);
-    console.log("SMTP_SECURE:", process.env.SMTP_SECURE);
-    console.log("SMTP_USER:", process.env.SMTP_USER);
+    console.log("Iniciando teste de e-mail via Resend...");
+    console.log("EMAIL_REMETENTE:", process.env.EMAIL_REMETENTE);
     console.log("EMAIL_DESTINO:", process.env.EMAIL_DESTINO);
 
-    await transporter.verify();
-
-    console.log("SMTP verificado com sucesso.");
-
-    await transporter.sendMail({
-      from: `"Teste Site Dr. Lucas" <${process.env.SMTP_USER}>`,
-      to: process.env.EMAIL_DESTINO,
-      subject: "Teste de envio do formulário",
-      text: "Se você recebeu este e-mail, o SMTP do formulário está funcionando."
+    const { data, error } = await resend.emails.send({
+      from: process.env.EMAIL_REMETENTE,
+      to: [process.env.EMAIL_DESTINO],
+      subject: "Teste de envio do formulário via Resend",
+      text: "Se você recebeu este e-mail, a API do Resend está funcionando."
     });
 
-    console.log("E-mail de teste enviado com sucesso.");
-    return res.send("E-mail de teste enviado com sucesso.");
+    if (error) {
+      console.error("Erro Resend no teste:", error);
+      return res.status(500).send("Erro no teste de e-mail via Resend. Veja os logs.");
+    }
+
+    console.log("E-mail de teste enviado via Resend:", data);
+    return res.send("E-mail de teste enviado com sucesso via Resend.");
   } catch (err) {
-    console.error("Erro no teste de e-mail:", err);
-    return res.status(500).send("Erro no teste de e-mail. Veja os logs do Render.");
+    console.error("Erro geral no teste de e-mail:", err);
+    return res.status(500).send("Erro geral no teste de e-mail. Veja os logs.");
   }
 });
 
@@ -156,7 +186,7 @@ app.post("/contato", contatoLimiter, async (req, res) => {
       website
     } = req.body;
 
-    // Honeypot novo e antigo. Se qualquer um vier preenchido, provavelmente é robô.
+    // Honeypot: se campo invisível vier preenchido, é provável bot.
     if (empresa_site_confirmacao || website) {
       console.log("Bloqueado por honeypot.");
       return res.send("Envio recebido.");
@@ -206,35 +236,29 @@ app.post("/contato", contatoLimiter, async (req, res) => {
     console.log("Contato salvo no Supabase:", data);
 
     try {
-      console.log("Tentando enviar e-mail...");
-      console.log("SMTP_USER:", process.env.SMTP_USER);
-      console.log("EMAIL_DESTINO:", process.env.EMAIL_DESTINO);
+      console.log("Tentando enviar e-mail via Resend...");
 
-      await transporter.sendMail({
-        from: `"Site Dr. Lucas" <${process.env.SMTP_USER}>`,
-        to: process.env.EMAIL_DESTINO,
+      const emailPayload = {
+        from: process.env.EMAIL_REMETENTE,
+        to: [process.env.EMAIL_DESTINO],
         subject: `Novo contato do site: ${dados.nome}`,
-        replyTo: dados.email || process.env.SMTP_USER,
-        text: `
-Novo contato recebido pelo site:
+        text: montarTextoEmail(dados),
+        html: montarHtmlEmail(dados)
+      };
 
-Nome: ${dados.nome}
-WhatsApp: ${dados.whatsapp}
-E-mail: ${dados.email || "Não informado"}
-Cidade: ${dados.cidade || "Não informada"}
-Motivo: ${dados.motivo || "Não informado"}
+      if (dados.email) {
+        emailPayload.replyTo = dados.email;
+      }
 
-Mensagem:
-${dados.mensagem}
+      const { data: emailData, error: emailError } = await resend.emails.send(emailPayload);
 
-IP:
-${dados.ip}
-        `
-      });
-
-      console.log("E-mail enviado com sucesso.");
-    } catch (emailError) {
-      console.error("Contato salvo, mas falhou ao enviar e-mail:", emailError);
+      if (emailError) {
+        console.error("Contato salvo, mas falhou ao enviar via Resend:", emailError);
+      } else {
+        console.log("E-mail enviado via Resend:", emailData);
+      }
+    } catch (emailCatchError) {
+      console.error("Contato salvo, mas erro geral no envio via Resend:", emailCatchError);
     }
 
     return res.redirect("https://drlucasgomes.com.br/obrigado-contato");
